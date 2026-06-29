@@ -1,203 +1,118 @@
+import Scope from './scope.js';
+import Resolver from './resolver.js';
+
 /**
- * A simple dependency injection container for JavaScript.
- * 
- * Based on: https://dev.to/emanuelgustafzon/build-your-own-di-container-in-javascript-2da3
+ * @typedef {'transient' | 'singleton' | 'scoped'} ScopeType
+ * Define os escopos suportados pelo container.
+ */
+
+/**
+ * @typedef {Function | (new (...args: any[]) => any)} ServiceDefinition
+ * Pode ser uma Factory Function ou um Construtor de Classe.
+ */
+
+/**
+ * @typedef {{ 
+ *   definition: ServiceDefinition, 
+ *   scope: ScopeType, 
+ *   dependencies: string[] 
+ * }} ServiceRegistration
+ * Estrutura interna de armazenamento de um serviço registrado.
+ */
+
+/**
+ * @typedef {Object} IDisposable
+ * @property {Function} [dispose] - Método legado de descarte.
+ * @property {Function} [Symbol.dispose] - Método moderno de descarte (ECMAScript).
+ */
+
+/**
+ * Container de Injeção de Dependência (DI).
+ * Gerencia o registro, resolução e ciclo de vida de serviços.
+ * @class
  */
 export default class Container {
+  /**
+   * Enumeração dos escopos suportados.
+   * @readonly
+   * @enum {ScopeType}
+   */
   static SCOPES = Object.freeze({
     TRANSIENT: 'transient',
     SINGLETON: 'singleton',
     SCOPED: 'scoped'
   });
 
+  /** @type {Map<string, ServiceRegistration>} */
   #services = new Map();
-  #scopedServices = new Map();
+
+  /** @type {Map<string, any>} */
+  #singletons = new Map();
 
   /**
-   * Registers a service with the container.
-   * @param {string} name - The name of the service to register
-   * @param {Function} definition - The class or factory function that defines the service
-   * @param {'transient'|'singleton'|'scoped'} scope - The scope of the service ('transient', 'singleton', or 'scoped')
-   * @param {string[]} dependencies - An array of service names that this service depends on
+   * Registra um serviço no container.
+   * @param {string} name - Nome único do serviço (chave de resolução).
+   * @param {ServiceDefinition} definition - Classe construtora ou Factory Function.
+   * @param {ScopeType} scope - Escopo do serviço (transient, singleton, scoped).
+   * @param {string[]} [dependencies=[]] - Lista de nomes das dependências a serem injetadas.
+   * @returns {Container} Retorna a própria instância para suporte a Fluent API.
+   * @throws {Error} Se o nome for vazio, já estiver registrado ou o escopo for inválido.
    */
   register(name, definition, scope, dependencies = []) {
-    if (!name || typeof name !== 'string') {
-      throw new Error('Service name must be a non-empty string.');
+    if (!name) throw new Error('Service name is required.');
+    if (this.#services.has(name)) throw new Error(`Service "${name}" already registered.`);
+    
+    const validScopes = Object.values(Container.SCOPES);
+    if (!validScopes.includes(scope)) {
+      throw new Error(`Invalid scope "${scope}". Must be one of: ${validScopes.join(', ')}`);
     }
 
-    if (typeof definition !== 'function') {
-      throw new Error(`Service "${name}" definition must be a function or class.`);
-    }
-
-    if (!Object.values(Container.SCOPES).includes(scope)) {
-      throw new Error(
-        `Invalid scope "${scope}". Valid scopes are: ${Object.values(Container.SCOPES).join(', ')}.`
-      );
-    }
-
-    if (!Array.isArray(dependencies)) {
-      throw new Error(`Dependencies for "${name}" must be an array.`);
-    }
-
-    this.#services.set(name, {
-      definition,
-      scope,
-      dependencies,
-      instance: null
-    });
+    this.#services.set(name, { definition, scope, dependencies });
+    return this; 
   }
 
   /**
-   * Resolves a service by its name, creating a new instance if necessary based on its scope.
-   * @param {string} name - The name of the service to resolve
-   * @param {*} context - The context for scoped services
-   * @returns {*} - The resolved service instance
+   * Cria um novo escopo (Scope) para resolução de serviços scoped.
+   * @returns {Scope} Uma nova instância de escopo isolada.
    */
-  resolve(name, context = null) {
-    return this.#resolve(name, context, []);
+  createScope() {
+    return new Scope(this);
   }
 
   /**
-   * Internal resolver with circular dependency tracking.
-   * 
-   * @param {string} name - The name of the service to resolve
-   * @param {*} context - The context for scoped services
-   * @param {Array} resolutionPath - The current resolution path for circular dependency detection
-   *
-   * @private
+   * Resolve um serviço no escopo raiz (apenas transient e singleton são permitidos).
+   * @param {string} name - Nome do serviço a ser resolvido.
+   * @returns {any} A instância do serviço resolvido.
+   * @throws {Error} Se o serviço não for encontrado ou exigir um escopo.
    */
-  #resolve(name, context, resolutionPath) {
-    const service = this.#services.get(name);
-
-    if (!service) {
-      throw new Error(`Service "${name}" not found.`);
-    }
-
-    // Check for circular dependencies
-    if (resolutionPath.includes(name)) {
-      const cycle = [...resolutionPath, name].join(' -> ');
-
-      throw new Error(
-        `Circular dependency detected: ${cycle}`
-      );
-    }
-
-    const currentPath = [...resolutionPath, name];
-
-    switch (service.scope) {
-      case Container.SCOPES.TRANSIENT:
-        return this.#createInstance(service, context, currentPath);
-
-      case Container.SCOPES.SINGLETON:
-        if (!service.instance) {
-          service.instance = this.#createInstance(
-            service,
-            context,
-            currentPath
-          );
-        }
-
-        return service.instance;
-
-      case Container.SCOPES.SCOPED:
-        return this.#resolveScoped(
-          name,
-          service,
-          context,
-          currentPath
-        );
-
-      default:
-        throw new Error(`Unsupported scope "${service.scope}".`);
-    }
+  resolve(name) {
+    return new Resolver(this, null).resolve(name);
   }
 
   /**
-   * Resolves a scoped service.
-   * 
-   * @param {string} name - The name of the service to resolve
-   * @param {Object} service - The service definition object
-   * @param {*} context - The context for the scoped service
-   * @param {Array} resolutionPath - The current resolution path for circular dependency detection
-   *
-   * @private
+   * Recupera a definição de um serviço registrado (Uso interno do Resolver).
+   * @param {string} name - Nome do serviço.
+   * @returns {ServiceRegistration | undefined}
    */
-  #resolveScoped(name, service, context, resolutionPath) {
-    if (!context) {
-      throw new Error(
-        `Scoped service "${name}" requires a context.`
-      );
-    }
-
-    if (!this.#scopedServices.has(context)) {
-      this.#scopedServices.set(context, new Map());
-    }
-
-    const contextServices = this.#scopedServices.get(context);
-
-    if (!contextServices.has(name)) {
-      const instance = this.#createInstance(
-        service,
-        context,
-        resolutionPath
-      );
-
-      contextServices.set(name, instance);
-    }
-
-    return contextServices.get(name);
+  getService(name) {
+    return this.#services.get(name);
   }
 
   /**
-   * Creates a service instance.
-   * 
-   * @param {Object} service - The service definition object
-   * @param {*} context - The context for scoped services
-   * @param {Array} resolutionPath - The current resolution path for circular dependency detection
-   *
-   * Supports:
-   * - ES Classes
-   * - Factory functions
-   *
-   * @private
+   * Recupera uma instância singleton armazenada (Uso interno do Resolver).
+   * @param {string} name - Nome do serviço.
+   * @returns {any | undefined}
    */
-  #createInstance(service, context, resolutionPath) {
-    // Resolve dependencies recursively
-    const dependencies = service.dependencies.map(dependency =>
-      this.#resolve(dependency, context, resolutionPath)
-    );
-
-    return this.#instantiate(service.definition, dependencies);
+  getSingleton(name) {
+    return this.#singletons.get(name);
   }
 
   /**
-   * Instantiates a class or invokes a factory function.
-   * 
-   * @param {Function} definition - The class or factory function to instantiate
-   * @param {Array} dependencies - The resolved dependencies to pass to the constructor or factory function
-   *
-   * @private
+   * Armazena uma instância singleton (Uso interno do Resolver).
+   * @param {string} name - Nome do serviço.
+   * @param {any} instance - A instância a ser armazenada.
    */
-  #instantiate(definition, dependencies) {
-    const source = Function.prototype.toString.call(definition);
-
-    const isClass =
-      /^class\s/.test(source) ||
-      (definition.prototype &&
-        Object.getOwnPropertyNames(definition.prototype).length > 1);
-
-    if (isClass) {
-      return new definition(...dependencies);
-    }
-
-    return definition(...dependencies);
-  }
-
-  /**
-   * Clears all services associated with a given context.
-   * @param {*} context - The context for which to clear services
-   */
-  clearContext(context) {
-    this.#scopedServices.delete(context);
+  setSingleton(name, instance) {
+    this.#singletons.set(name, instance);
   }
 }

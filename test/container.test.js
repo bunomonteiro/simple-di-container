@@ -1,418 +1,224 @@
-import test from 'node:test';
+import { describe, test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-
 import Container from '../src/container.js';
 
-test('register should throw for invalid scope', () => {
-  const container = new Container();
+describe('Container DI - Registro e Configuração', () => {
+  let container;
 
-  class Service {}
+  beforeEach(() => {
+    container = new Container();
+  });
 
-  assert.throws(
-    () => {
-      container.register(
-        'service',
-        Service,
-        'invalid-scope'
-      );
-    },
-    /Invalid scope/
-  );
+  test('deve lançar erro ao registrar sem nome', () => {
+    assert.throws(() => container.register('', class {}, 'transient'), /Service name is required/);
+  });
+
+  test('deve lançar erro ao registrar nome duplicado', () => {
+    container.register('svc', class {}, 'transient');
+    assert.throws(() => container.register('svc', class {}, 'transient'), /already registered/);
+  });
+
+  test('deve lançar erro ao registrar com escopo inválido (Fail-Fast)', () => {
+    assert.throws(
+      () => container.register('svc', class {}, 'invalid_scope'),
+      /Invalid scope/
+    );
+  });
+
+  test('deve suportar encadeamento (Fluent API) no registro', () => {
+    const result = container.register('svc', class {}, 'transient');
+    assert.strictEqual(result, container, 'register deve retornar a instância do container');
+  });
 });
 
-test('should resolve factory function', () => {
-  const container = new Container();
+describe('Container DI - Resolução e Injeção', () => {
+  let container;
 
-  container.register(
-    'config',
-    () => ({
-      url: 'https://api.test'
-    }),
-    'singleton'
-  );
+  beforeEach(() => {
+    container = new Container();
+  });
 
-  const config = container.resolve('config');
+  test('deve lançar erro ao resolver serviço inexistente', () => {
+    assert.throws(() => container.resolve('missing'), /Service "missing" not found/);
+  });
 
-  assert.deepEqual(
-    config,
-    {
-      url: 'https://api.test'
-    }
-  );
+  test('deve resolver Factory Function sem dependências', () => {
+    container.register('config', () => ({ env: 'test' }), Container.SCOPES.SINGLETON);
+    assert.deepStrictEqual(container.resolve('config'), { env: 'test' });
+  });
+
+  test('deve resolver Factory Function com dependências injetadas', () => {
+    container.register('logger', () => ({ log: () => {} }), Container.SCOPES.SINGLETON);
+    container.register('config', (logger) => ({ logger, env: 'prod' }), Container.SCOPES.SINGLETON, ['logger']);
+    
+    const config = container.resolve('config');
+    assert.strictEqual(config.env, 'prod');
+    assert.ok(typeof config.logger.log === 'function');
+  });
+
+  test('deve resolver grafo de dependências transitivas (A -> B -> C)', () => {
+    class C {}
+    class B { constructor(c) { this.c = c; } }
+    class A { constructor(b) { this.b = b; } }
+
+    container.register('c', C, Container.SCOPES.TRANSIENT);
+    container.register('b', B, Container.SCOPES.TRANSIENT, ['c']);
+    container.register('a', A, Container.SCOPES.TRANSIENT, ['b']);
+
+    const a = container.resolve('a');
+    assert.ok(a.b instanceof B);
+    assert.ok(a.b.c instanceof C);
+  });
 });
 
-test('resolve should throw when service does not exist', () => {
-  const container = new Container();
+describe('Container DI - Ciclos de Vida (Scopes)', () => {
+  let container;
 
-  assert.throws(
-    () => container.resolve('missing'),
-    {
-      message: 'Service "missing" not found.'
-    }
-  );
+  beforeEach(() => {
+    container = new Container();
+  });
+
+  test('Transient: deve criar nova instância a cada resolução', () => {
+    container.register('svc', class {}, Container.SCOPES.TRANSIENT);
+    assert.notStrictEqual(container.resolve('svc'), container.resolve('svc'));
+  });
+
+  test('Singleton: deve retornar a mesma instância e executar factory uma vez', () => {
+    let calls = 0;
+    container.register('svc', () => { calls++; return { id: 1 }; }, Container.SCOPES.SINGLETON);
+    
+    const a = container.resolve('svc');
+    const b = container.resolve('svc');
+    
+    assert.strictEqual(a, b);
+    assert.strictEqual(calls, 1);
+  });
+
+  test('Scoped: deve lançar erro se resolvido fora de um escopo (Root)', () => {
+    container.register('svc', class {}, Container.SCOPES.SCOPED);
+    assert.throws(() => container.resolve('svc'), /requires a scope/);
+  });
+
+  test('Scoped: deve reutilizar instância dentro do mesmo escopo', () => {
+    container.register('svc', class {}, Container.SCOPES.SCOPED);
+    const scope = container.createScope();
+    assert.strictEqual(scope.resolve('svc'), scope.resolve('svc'));
+  });
+
+  test('Scoped: deve isolar instâncias entre escopos diferentes', () => {
+    container.register('svc', class {}, Container.SCOPES.SCOPED);
+    const scope1 = container.createScope();
+    const scope2 = container.createScope();
+    assert.notStrictEqual(scope1.resolve('svc'), scope2.resolve('svc'));
+  });
+
+  test('Scoped: dependências devem compartilhar o mesmo escopo', () => {
+    class Dep {}
+    class Svc { constructor(dep) { this.dep = dep; } }
+    
+    container.register('dep', Dep, Container.SCOPES.SCOPED);
+    container.register('svc', Svc, Container.SCOPES.SCOPED, ['dep']);
+    
+    const scope = container.createScope();
+    const svc = scope.resolve('svc');
+    const dep = scope.resolve('dep');
+    
+    assert.strictEqual(svc.dep, dep);
+  });
 });
 
-test('should throw for circular dependency', () => {
-  const container = new Container();
+describe('Container DI - Detecção de Dependência Circular', () => {
+  let container;
 
-  class A {}
-  class B {}
-  class C {}
+  beforeEach(() => {
+    container = new Container();
+  });
 
-  container.register(
-    'a',
-    A,
-    'transient',
-    ['b']
-  );
+  test('deve detectar auto-dependência', () => {
+    container.register('svc', class {}, Container.SCOPES.TRANSIENT, ['svc']);
+    assert.throws(() => container.resolve('svc'), /Circular dependency: svc -> svc/);
+  });
 
-  container.register(
-    'b',
-    B,
-    'transient',
-    ['c']
-  );
-
-  container.register(
-    'c',
-    C,
-    'transient',
-    ['a']
-  );
-
-  assert.throws(
-    () => container.resolve('a'),
-    {
-      message:
-        'Circular dependency detected: a -> b -> c -> a'
-    }
-  );
+  test('deve detectar ciclo longo (A -> B -> C -> A)', () => {
+    container.register('a', class {}, Container.SCOPES.TRANSIENT, ['b']);
+    container.register('b', class {}, Container.SCOPES.TRANSIENT, ['c']);
+    container.register('c', class {}, Container.SCOPES.TRANSIENT, ['a']);
+    
+    assert.throws(() => container.resolve('a'), /Circular dependency: a -> b -> c -> a/);
+  });
 });
 
-test('should detect self dependency', () => {
-  const container = new Container();
-
-  class Service {}
-
-  container.register(
-    'service',
-    Service,
-    'transient',
-    ['service']
-  );
-
-  assert.throws(
-    () => container.resolve('service'),
-    {
-      message:
-        'Circular dependency detected: service -> service'
-    }
-  );
-});
-
-test('transient should create a new instance every time', () => {
-  const container = new Container();
-
-  class Service { }
-
-  container.register(
-    'service',
-    Service,
-    'transient'
-  );
-
-  const a = container.resolve('service');
-  const b = container.resolve('service');
-
-  assert.notEqual(a, b);
-});
-
-test('transient should resolve dependencies', () => {
-  const container = new Container();
-
-  class Dependency { }
-
-  class Service {
-    constructor(dep) {
-      this.dep = dep;
-    }
-  }
-
-  container.register(
-    'dependency',
-    Dependency,
-    'transient'
-  );
-
-  container.register(
-    'service',
-    Service,
-    'transient',
-    ['dependency']
-  );
-
-  const service = container.resolve('service');
-
-  assert.ok(service.dep instanceof Dependency);
-});
-
-test('singleton should return the same instance', () => {
-  const container = new Container();
-
-  class Service { }
-
-  container.register(
-    'service',
-    Service,
-    'singleton'
-  );
-
-  const a = container.resolve('service');
-  const b = container.resolve('service');
-
-  assert.equal(a, b);
-});
-
-test('singleton should instantiate only once', () => {
-  const container = new Container();
-
-  let calls = 0;
-
-  class Service {
-    constructor() {
-      calls++;
-    }
-  }
-
-  container.register(
-    'service',
-    Service,
-    'singleton'
-  );
-
-  container.resolve('service');
-  container.resolve('service');
-  container.resolve('service');
-
-  assert.equal(calls, 1);
-});
-
-test('singleton should resolve dependencies only once', () => {
-  const container = new Container();
-
-  let dependencyCalls = 0;
-
-  class Dependency {
-    constructor() {
-      dependencyCalls++;
-    }
-  }
-
-  class Service {
-    constructor(dep) {
-      this.dep = dep;
-    }
-  }
-
-  container.register(
-    'dependency',
-    Dependency,
-    'singleton'
-  );
-
-  container.register(
-    'service',
-    Service,
-    'singleton',
-    ['dependency']
-  );
-
-  container.resolve('service');
-  container.resolve('service');
-
-  assert.equal(dependencyCalls, 1);
-});
-
-test('singleton factory should execute only once', () => {
-  const container = new Container();
-
-  let calls = 0;
-
-  container.register(
-    'config',
-    () => {
-      calls++;
-
-      return {
-        value: 123
-      };
-    },
-    'singleton'
-  );
-
-  container.resolve('config');
-  container.resolve('config');
-  container.resolve('config');
-
-  assert.equal(calls, 1);
-});
-
-test('scoped should throw when context is missing', () => {
-  const container = new Container();
-
-  class Service { }
-
-  container.register(
-    'service',
-    Service,
-    'scoped'
-  );
-
-  assert.throws(
-    () => container.resolve('service'),
-    {
-      message: 'Scoped service "service" requires a context.'
-    }
-  );
-});
-
-test('scoped should create one instance per context', () => {
-  const container = new Container();
-
-  class Service { }
-
-  const contextA = {};
-  const contextB = {};
-
-  container.register(
-    'service',
-    Service,
-    'scoped'
-  );
-
-  const a1 = container.resolve('service', contextA);
-  const a2 = container.resolve('service', contextA);
-
-  const b1 = container.resolve('service', contextB);
-
-  assert.equal(a1, a2);
-  assert.notEqual(a1, b1);
-});
-
-test('scoped should resolve dependencies using same context', () => {
-  const container = new Container();
-
-  class Dependency { }
-
-  class Service {
-    constructor(dep) {
-      this.dep = dep;
-    }
-  }
-
-  const context = {};
-
-  container.register(
-    'dependency',
-    Dependency,
-    'scoped'
-  );
-
-  container.register(
-    'service',
-    Service,
-    'scoped',
-    ['dependency']
-  );
-
-  const service = container.resolve(
-    'service',
-    context
-  );
-
-  const dependency = container.resolve(
-    'dependency',
-    context
-  );
-
-  assert.equal(service.dep, dependency);
-});
-
-test('should resolve transitive dependencies', () => {
-  const container = new Container();
-
-  class C { }
-
-  class B {
-    constructor(c) {
-      this.c = c;
-    }
-  }
-
-  class A {
-    constructor(b) {
-      this.b = b;
-    }
-  }
-
-  container.register(
-    'c',
-    C,
-    'transient'
-  );
-
-  container.register(
-    'b',
-    B,
-    'transient',
-    ['c']
-  );
-
-  container.register(
-    'a',
-    A,
-    'transient',
-    ['b']
-  );
-
-  const a = container.resolve('a');
-
-  assert.ok(a.b instanceof B);
-  assert.ok(a.b.c instanceof C);
-});
-
-test('clearContext should force recreation of scoped instances', () => {
-  const container = new Container();
-
-  class Service {}
-
-  const context = {};
-
-  container.register(
-    'service',
-    Service,
-    'scoped'
-  );
-
-  const first = container.resolve(
-    'service',
-    context
-  );
-
-  container.clearContext(context);
-
-  const second = container.resolve(
-    'service',
-    context
-  );
-
-  assert.notEqual(first, second);
-});
-
-test('clearContext should not throw when context does not exist', () => {
-  const container = new Container();
-
-  assert.doesNotThrow(() => {
-    container.clearContext({});
+describe('Scope - Ciclo de Vida e Descarte (Dispose)', () => {
+  let container;
+
+  beforeEach(() => {
+    container = new Container();
+  });
+
+  test('deve chamar método legado .dispose() ao fechar o escopo', () => {
+    let disposed = false;
+    class Svc { dispose() { disposed = true; } }
+    
+    container.register('svc', Svc, Container.SCOPES.SCOPED);
+    const scope = container.createScope();
+    scope.resolve('svc');
+    scope.dispose();
+    
+    assert.strictEqual(disposed, true);
+  });
+
+  test('deve chamar Symbol.dispose (ECMAScript moderno) ao fechar o escopo', () => {
+    let disposed = false;
+    class Svc { [Symbol.dispose]() { disposed = true; } }
+    
+    container.register('svc', Svc, Container.SCOPES.SCOPED);
+    const scope = container.createScope();
+    scope.resolve('svc');
+    scope.dispose();
+    
+    assert.strictEqual(disposed, true);
+  });
+
+  test('deve ser idempotente (chamar dispose múltiplas vezes não deve gerar erro)', () => {
+    container.register('svc', class {}, Container.SCOPES.SCOPED);
+    const scope = container.createScope();
+    scope.resolve('svc');
+    
+    assert.doesNotThrow(() => {
+      scope.dispose();
+      scope.dispose(); // Segunda chamada deve ser ignorada silenciosamente
+    });
+  });
+
+  test('não deve permitir resolução após o descarte', () => {
+    container.register('svc', class {}, Container.SCOPES.SCOPED);
+    const scope = container.createScope();
+    scope.dispose();
+    
+    assert.throws(() => scope.resolve('svc'), /Scope already disposed/);
+  });
+
+  test('CRÍTICO: deve isolar falhas e continuar descartando outros serviços', () => {
+    let successDisposed = false;
+    
+    class FailingSvc { [Symbol.dispose]() { throw new Error('Falha catastrófica'); } }
+    class SuccessSvc { [Symbol.dispose]() { successDisposed = true; } }
+    
+    container.register('fail', FailingSvc, Container.SCOPES.SCOPED);
+    container.register('success', SuccessSvc, Container.SCOPES.SCOPED);
+    
+    const scope = container.createScope();
+    scope.resolve('fail');
+    scope.resolve('success');
+    
+    // Suprime o erro do console para não poluir o output do teste
+    const originalError = console.error;
+    console.error = () => {}; 
+    
+    assert.doesNotThrow(() => scope.dispose(), 'O dispose do scope não deve propagar a exceção');
+    
+    console.error = originalError;
+    
+    assert.strictEqual(successDisposed, true, 'O segundo serviço DEVE ser descartado mesmo se o primeiro falhar');
   });
 });
