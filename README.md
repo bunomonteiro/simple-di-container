@@ -1,18 +1,18 @@
 # Simple DI Container
 
-A lightweight Dependency Injection (DI) container for JavaScript and Node.js applications.
+A lightweight, zero-dependency Dependency Injection (DI) container for JavaScript and Node.js applications. 
 
-Supports:
+Built with modern ECMAScript standards in mind, featuring explicit scope management and native resource disposal.
 
-* Transient services
-* Singleton services
-* Scoped services
-* Dependency resolution
-* Circular dependency detection
-* Classes and factory functions
-* Zero dependencies
+## Features
 
----
+- **Service Lifetimes:** Transient, Singleton, and Scoped.
+- **Explicit Scope Management:** Predictable lifecycle for HTTP requests and background jobs.
+- **Modern Resource Disposal:** Native support for `Symbol.dispose` (ECMAScript Explicit Resource Management) and legacy `.dispose()`.
+- **Robust Resolution:** Automatic dependency graph resolution and circular dependency detection.
+- **Fail-Fast Configuration:** Validates scopes and dependencies at registration time.
+- **Flexible Definitions:** Supports both ES6 Classes and Factory Functions.
+- **Zero Dependencies:** 100% vanilla JavaScript, ideal for self-hosted and minimal environments.
 
 ## Installation
 
@@ -20,467 +20,179 @@ Supports:
 npm install simple-di-container
 ```
 
----
-
-## Import
-
-```javascript
-import Container from 'simple-di-container';
-```
-
----
-
 ## Quick Start
 
 ```javascript
-import Container from 'simple-di-container';
+import { Container } from 'simple-di-container';
 
 const container = new Container();
 
 class Logger {
-  log(message) {
-    console.log(message);
-  }
+  log(message) { console.log(message); }
 }
 
 class UserService {
-  constructor(logger) {
-    this.logger = logger;
-  }
-
+  constructor(logger) { this.logger = logger; }
   getUsers() {
     this.logger.log('Loading users...');
     return [];
   }
 }
 
-container.register(
-  'logger',
-  Logger,
-  'singleton'
-);
+// Register services
+container.register('logger', Logger, Container.SCOPES.SINGLETON);
+container.register('userService', UserService, Container.SCOPES.TRANSIENT, ['logger']);
 
-container.register(
-  'userService',
-  UserService,
-  'transient',
-  ['logger']
-);
-
+// Resolve and use
 const userService = container.resolve('userService');
-
 userService.getUsers();
 ```
 
----
+## Service Lifetimes
 
-# Service Lifetimes
-
-## Transient
-
+### Transient
 Creates a new instance every time the service is resolved.
-
 ```javascript
-container.register(
-  'logger',
-  Logger,
-  'transient'
-);
-
+container.register('logger', Logger, Container.SCOPES.TRANSIENT);
 const a = container.resolve('logger');
 const b = container.resolve('logger');
-
-console.log(a === b);
-// false
+console.log(a === b); // false
 ```
 
----
-
-## Singleton
-
+### Singleton
 Creates a single instance and reuses it for the lifetime of the container.
-
 ```javascript
-container.register(
-  'config',
-  ConfigService,
-  'singleton'
-);
-
+container.register('config', ConfigService, Container.SCOPES.SINGLETON);
 const a = container.resolve('config');
 const b = container.resolve('config');
-
-console.log(a === b);
-// true
+console.log(a === b); // true
 ```
 
----
+### Scoped
+Creates one instance per explicit scope. Ideal for HTTP requests, database transactions, or Unit of Work patterns.
+```javascript
+container.register('requestContext', RequestContext, Container.SCOPES.SCOPED);
 
-## Scoped
+// Create an explicit scope
+const scope1 = container.createScope();
+const a1 = scope1.resolve('requestContext');
+const a2 = scope1.resolve('requestContext');
+console.log(a1 === a2); // true (same scope)
 
-Creates one instance per context.
+const scope2 = container.createScope();
+const b1 = scope2.resolve('requestContext');
+console.log(a1 === b1); // false (different scopes)
 
-Useful for:
+// Clean up resources
+scope1.dispose();
+scope2.dispose();
+```
 
-* HTTP requests
-* Background jobs
-* Sessions
-* Unit of Work patterns
+## Modern Resource Disposal (Symbol.dispose)
+
+The container automatically tracks scoped services that implement disposal methods and calls them in reverse order (LIFO) when the scope is disposed. It supports both the modern ECMAScript `Symbol.dispose` and the legacy `.dispose()` method.
+
+*Note: If a service throws an error during disposal, the container catches it, logs it, and continues disposing the remaining services to prevent memory/connection leaks.*
 
 ```javascript
-container.register(
-  'requestContext',
-  RequestContext,
-  'scoped'
-);
+class DatabaseConnection {
+  constructor() { this.isConnected = true; }
+  
+  // Modern ECMAScript disposal
+  [Symbol.dispose]() { 
+    this.isConnected = false; 
+    console.log('Connection closed.');
+  }
+}
 
-const requestA = {};
-const requestB = {};
+container.register('db', DatabaseConnection, Container.SCOPES.SCOPED);
 
-const a1 = container.resolve(
-  'requestContext',
-  requestA
-);
+const scope = container.createScope();
+const db = scope.resolve('db');
+console.log(db.isConnected); // true
 
-const a2 = container.resolve(
-  'requestContext',
-  requestA
-);
-
-const b1 = container.resolve(
-  'requestContext',
-  requestB
-);
-
-console.log(a1 === a2);
-// true
-
-console.log(a1 === b1);
-// false
+scope.dispose(); 
+// Logs: "Connection closed."
 ```
 
----
+## API Reference
 
-# Registering Services
+### `container.register(name, definition, scope, [dependencies])`
+Registers a service. Validates the scope immediately (Fail-Fast).
+- `name` *(string)*: Service identifier.
+- `definition` *(Class | Function)*: Class constructor or factory function.
+- `scope` *(string)*: Use `Container.SCOPES.TRANSIENT`, `SINGLETON`, or `SCOPED`.
+- `dependencies` *(string[])*: Optional array of dependency names to inject.
 
-## Class Registration
+### `container.resolve(name)`
+Resolves a service from the root container. Only `transient` and `singleton` services can be resolved from the root.
 
-```javascript
-container.register(
-  'userRepository',
-  UserRepository,
-  'singleton'
-);
-```
+### `container.createScope()`
+Creates a new, isolated scope for resolving `scoped` services. Returns a `Scope` instance.
 
----
+### `scope.resolve(name)`
+Resolves a service within the specific scope.
 
-## Registration with Dependencies
+### `scope.dispose()`
+Destroys the scope, calling the disposal method (`Symbol.dispose` or `dispose`) on all tracked scoped services in LIFO order.
 
-```javascript
-container.register(
-  'userRepository',
-  UserRepository,
-  'singleton',
-  ['logger']
-);
+## Framework Integration (Express.js Example)
 
-container.register(
-  'userService',
-  UserService,
-  'transient',
-  ['userRepository']
-);
-```
-
-Dependencies are resolved automatically when the service is instantiated.
-
----
-
-## Factory Functions
-
-Factory functions are supported out of the box.
-
-```javascript
-container.register(
-  'config',
-  () => ({
-    apiUrl: 'https://api.example.com',
-    timeout: 5000
-  }),
-  'singleton'
-);
-
-const config = container.resolve('config');
-```
-
-Factories can also receive dependencies:
-
-```javascript
-container.register(
-  'logger',
-  Logger,
-  'singleton'
-);
-
-container.register(
-  'config',
-  logger => {
-    logger.log('Creating configuration');
-
-    return {
-      apiUrl: 'https://api.example.com'
-    };
-  },
-  'singleton',
-  ['logger']
-);
-```
-
----
-
-# API
-
-## register(name, definition, scope, dependencies)
-
-Registers a service.
-
-### Parameters
-
-| Parameter    | Type     | Description                    |
-| ------------ | -------- | ------------------------------ |
-| name         | string   | Service identifier             |
-| definition   | Function | Class or factory function      |
-| scope        | string   | transient, singleton or scoped |
-| dependencies | string[] | Service dependencies           |
-
-### Example
-
-```javascript
-container.register(
-  'emailService',
-  EmailService,
-  'singleton',
-  ['logger', 'config']
-);
-```
-
----
-
-## resolve(name, context)
-
-Resolves a service and all its dependencies.
-
-### Parameters
-
-| Parameter | Required | Description                       |
-| --------- | -------- | --------------------------------- |
-| name      | Yes      | Service identifier                |
-| context   | No       | Required only for scoped services |
-
-### Example
-
-```javascript
-const service = container.resolve(
-  'emailService'
-);
-```
-
-Scoped service:
-
-```javascript
-const request = {};
-
-const service = container.resolve(
-  'requestContext',
-  request
-);
-```
-
----
-
-## clearContext(context)
-
-Removes all scoped instances associated with a context.
-
-### Example
-
-```javascript
-container.clearContext(request);
-```
-
-After clearing a context, resolving a scoped service again creates a new instance.
-
----
-
-# Circular Dependency Detection
-
-The container automatically detects circular dependencies.
-
-Example:
-
-```javascript
-container.register(
-  'a',
-  A,
-  'transient',
-  ['b']
-);
-
-container.register(
-  'b',
-  B,
-  'transient',
-  ['c']
-);
-
-container.register(
-  'c',
-  C,
-  'transient',
-  ['a']
-);
-
-container.resolve('a');
-```
-
-Throws:
-
-```text
-Circular dependency detected: a -> b -> c -> a
-```
-
-Self-referencing services are also detected:
-
-```javascript
-container.register(
-  'service',
-  Service,
-  'transient',
-  ['service']
-);
-
-container.resolve('service');
-```
-
-Throws:
-
-```text
-Circular dependency detected: service -> service
-```
-
----
-
-# Error Handling
-
-## Service Not Found
-
-```javascript
-container.resolve('missing');
-```
-
-Throws:
-
-```text
-Service "missing" not found.
-```
-
----
-
-## Invalid Scope
-
-```javascript
-container.register(
-  'service',
-  Service,
-  'invalid'
-);
-```
-
-Throws:
-
-```text
-Invalid scope "invalid".
-```
-
----
-
-## Scoped Service Without Context
-
-```javascript
-container.resolve('requestContext');
-```
-
-Throws:
-
-```text
-Scoped service "requestContext" requires a context.
-```
-
----
-
-# Express Example
+Here is how to properly integrate the scoped lifecycle with an Express application:
 
 ```javascript
 import express from 'express';
-import Container from 'simple-di-container';
+import { Container } from 'simple-di-container';
 
 const app = express();
 const container = new Container();
 
 class RequestContext {
-  constructor() {
-    this.createdAt = new Date();
-  }
+  constructor() { this.requestId = crypto.randomUUID(); }
+  [Symbol.dispose]() { console.log(`Request ${this.requestId} context disposed.`); }
 }
 
-container.register(
-  'requestContext',
-  RequestContext,
-  'scoped'
-);
+container.register('requestContext', RequestContext, Container.SCOPES.SCOPED);
 
+// Middleware: Create scope at the beginning of the request
 app.use((req, res, next) => {
-  req.scope = req;
+  req.scope = container.createScope();
+  
+  // Ensure scope is disposed when the response finishes
+  res.on('finish', () => req.scope.dispose());
+  res.on('close', () => req.scope.dispose());
+  
   next();
 });
 
 app.get('/', (req, res) => {
-  const context = container.resolve(
-    'requestContext',
-    req.scope
-  );
-
-  res.json({
-    createdAt: context.createdAt
-  });
+  // Resolve using the request-specific scope
+  const context = req.scope.resolve('requestContext');
+  res.json({ requestId: context.requestId });
 });
 
-app.use((req, res, next) => {
-  container.clearContext(req.scope);
-  next();
-});
+app.listen(3000);
 ```
 
----
+## Error Handling
 
-# Design Goals
+The container is designed to fail fast and provide clear error messages:
 
-This library intentionally focuses on simplicity.
+- **Service Not Found:** `Service "missing" not found.`
+- **Invalid Scope (Fail-Fast):** `Invalid scope "invalid". Must be one of: transient, singleton, scoped`
+- **Scoped without Scope:** `Scoped service "requestContext" requires a scope.`
+- **Circular Dependency:** `Circular dependency: a -> b -> c -> a`
 
-It does not include:
+## Design Goals
 
-* Decorators
-* Reflection metadata
-* Auto-registration
-* Async factories
-* Service scanning
-* Framework-specific integrations
+This library intentionally focuses on simplicity, predictability, and zero external dependencies. 
 
-The goal is to provide a small, predictable and dependency-free DI container.
+It does **not** include:
+- Decorators or Reflection metadata (keeps it lightweight and transpiler-friendly).
+- Auto-registration or service scanning.
+- Async factories (keeps the resolution graph synchronous and predictable).
+- Framework-specific integrations (framework agnostic by design).
 
----
-
-# License
+## License
 
 MIT
